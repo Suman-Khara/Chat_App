@@ -1,108 +1,121 @@
-# SuperFastPython.com
-# example of a chat server using streams
 import asyncio
  
 # write a message to a stream writer
 async def write_message(writer, msg_bytes):
-    # write message to this user
     writer.write(msg_bytes)
-    # wait for the buffer to empty
     await writer.drain()
  
-# read messages from the queue and transmit them to all clients
+# read messages from the queue and transmit them to world chat users only
 async def broadcaster():
     global queue
     while True:
-        # read a message from the queue
         message = await queue.get()
-        # report locally
-        print(f'Broadcast: {message.strip()}')
-        # convert to bytes
+        print(f'Broadcast (World Chat): {message.strip()}')
         msg_bytes = message.encode()
-        # enumerate all users and broadcast the message
-        global ALL_USERS
-        # create a task for each write to client
-        tasks = [asyncio.create_task(write_message(w, msg_bytes)) for _,(_,w) in ALL_USERS.items()]
-        # wait for all writes to complete
+        global ALL_USERS, WORLD_CHAT_USERS
+        # Send only to users in world chat
+        tasks = [
+            asyncio.create_task(write_message(ALL_USERS[user][1], msg_bytes))
+            for user in WORLD_CHAT_USERS if user in ALL_USERS
+        ]
         _ = await asyncio.wait(tasks)
- 
-# send a message to all connected users
+
+# send a message to all connected users in world chat
 async def broadcast_message(message):
     global queue
-    # put the message in the queue
     await queue.put(message)
- 
+
+# handle user commands
+async def handle_command(name, reader, writer):
+    while True:
+        menu = "\nChoose an option:\n1. GLOBAL ONLINE\n2. WORLD CHAT\n"
+        writer.write(menu.encode())
+        await writer.drain()
+        
+        command_bytes = await reader.readline()
+        command = command_bytes.decode().strip()
+
+        if command == "GLOBAL ONLINE":
+            online_users = "\nOnline Members:\n" + "\n".join(ALL_USERS.keys()) + "\n"
+            writer.write(online_users.encode())
+            await writer.drain()
+        elif command == "WORLD CHAT":
+            # Add user to world chat
+            WORLD_CHAT_USERS.add(name)
+            await broadcast_message(f'{name} has joined the world chat\n')
+            writer.write("You have joined the world chat. Type EXIT to leave.\n".encode())
+            await writer.drain()
+            await handle_world_chat(name, reader, writer)
+        else:
+            writer.write("Invalid command. Try again.\n".encode())
+            await writer.drain()
+
+# Handle world chat interaction
+async def handle_world_chat(name, reader, writer):
+    try:
+        while True:
+            line_bytes = await reader.readline()
+            line = line_bytes.decode().strip()
+
+            if line == "EXIT":
+                WORLD_CHAT_USERS.remove(name)  # Remove user from world chat
+                writer.write("You have left the world chat.\n".encode())
+                await writer.drain()
+                break  # Return to main menu
+
+            await broadcast_message(f'{name}: {line}\n')
+    except:
+        pass  # Handle disconnects gracefully
+
 # connect a user
 async def connect_user(reader, writer):
-    # get name message
-    writer.write('Asycio Chat Server\n'.encode())
+    writer.write('Asyncio Chat Server\n'.encode())
     writer.write('Enter your name:\n'.encode())
     await writer.drain()
-    # ask the user for their name
+
     name_bytes = await reader.readline()
-    # convert name to string
     name = name_bytes.decode().strip()
-    # store the user details
     global ALL_USERS
     ALL_USERS[name] = (reader, writer)
-    # announce the user
-    await broadcast_message(f'{name} has connected\n')
-    # welcome message
-    welcome = f'Welcome {name}. Send QUIT to disconnect.\n'
-    writer.write(welcome.encode())
-    await writer.drain()
+
+    # Show options instead of auto-joining world chat
+    await handle_command(name, reader, writer)
+
     return name
  
 # disconnect a user
 async def disconnect_user(name, writer):
-    # close the user's connection
     writer.close()
     await writer.wait_closed()
-    # remove from the dict of all users
-    global ALL_USERS
+    global ALL_USERS, WORLD_CHAT_USERS
     del ALL_USERS[name]
-    # broadcast the user has left
+    if name in WORLD_CHAT_USERS:
+        WORLD_CHAT_USERS.remove(name)  # Remove if they were in world chat
     await broadcast_message(f'{name} has disconnected\n')
  
 # handle a chat client
 async def handle_chat_client(reader, writer):
     print('Client connecting...')
-    # connect the user
     name = await connect_user(reader, writer)
     try:
-        # read messages from the user
         while True:
-            # read a line of data
             line_bytes = await reader.readline()
-            # convert to string
             line = line_bytes.decode().strip()
-            # check for exit
             if line == 'QUIT':
                 break
-            # broadcast message
-            await broadcast_message(f'{name}: {line}\n')
     finally:
-        # disconnect the user
         await disconnect_user(name, writer)
- 
+
 # chat server
 async def main():
-    # start the broadcaster as a background task
     broadcaster_task = asyncio.create_task(broadcaster())
-    # define the local host
     host_address, host_port = '127.0.0.1', 8888
-    # create the server
     server = await asyncio.start_server(handle_chat_client, host_address, host_port)
-    # run the server
     async with server:
-        # report message
         print('Chat Server Running\nWaiting for chat clients...')
-        # accept connections
         await server.serve_forever()
  
-# dict of all current users
 ALL_USERS = {}
-# queue for broadcast messages
+WORLD_CHAT_USERS = set()  # Track users in world chat
 queue = asyncio.Queue()
-# start the event loop
 asyncio.run(main())
